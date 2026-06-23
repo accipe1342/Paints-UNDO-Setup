@@ -5,6 +5,7 @@ Cross-platform setup for lllyasviel/Paints-UNDO
 Supports Windows and Linux, auto-detects NVIDIA GPU and picks correct CUDA version.
 
 Requirements before running:
+  - Python 3.7+ (system Python is fine, just to run this script)
   - Miniconda or Anaconda installed and in PATH
   - Git installed and in PATH
   - NVIDIA GPU with drivers installed
@@ -12,31 +13,41 @@ Requirements before running:
 Usage:
   python setup.py
   python setup.py --install-dir /path/to/install
+  python setup.py --update        (re-apply patches to existing install)
 """
 
 import argparse
 import os
 import platform
-import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+# ── Python version check ─────────────────────────────────────────────────────
+
+if sys.version_info < (3, 7):
+    print("[ERROR] This script requires Python 3.7 or newer.")
+    print(f"        You are running Python {sys.version}")
+    print("        Install Python 3.10 or newer from https://www.python.org/")
+    sys.exit(1)
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
-REPO_URL = "https://github.com/lllyasviel/Paints-UNDO.git"
-ENV_NAME = "paints_undo"
+REPO_URL  = "https://github.com/lllyasviel/Paints-UNDO.git"
+ENV_NAME  = "paints_undo"
 PYTHON_VERSION = "3.10"
+MIN_VRAM_GB  = 8   # hard warning threshold — below this Step 2 will almost certainly fail
+SOFT_VRAM_GB = 10  # soft warning threshold — below this Step 2 may OOM on larger images
 
-# Maps GPU compute capability to PyTorch CUDA index URL
-# Compute capability -> (cu_tag, display_name)
+# Compute capability -> (cu_tag, friendly name)
 CUDA_MAP = {
     (12, 0): ("cu128", "CUDA 12.8 (RTX 5000 series)"),
     (8,  9): ("cu124", "CUDA 12.4 (RTX 4000 series)"),
     (8,  6): ("cu121", "CUDA 12.1 (RTX 3000 series)"),
     (7,  5): ("cu118", "CUDA 11.8 (RTX 2000 series)"),
     (7,  0): ("cu118", "CUDA 11.8 (Volta)"),
+    (6,  1): ("cu118", "CUDA 11.8 (GTX 1000 series)"),
 }
 
 PYTORCH_INDEX_BASE = "https://download.pytorch.org/whl"
@@ -62,25 +73,61 @@ REQUIREMENTS = [
 ]
 
 IS_WINDOWS = platform.system() == "Windows"
+IS_LINUX   = platform.system() == "Linux"
+
+# ── Banner ────────────────────────────────────────────────────────────────────
+
+BANNER = r"""
+  ███████████             ███              █████            █████  █████
+  ▒▒███▒▒▒▒▒███           ▒▒▒              ▒▒███            ▒▒███  ▒▒███
+   ▒███    ▒███  ██████   ████  ████████   ███████    █████  ▒███   ▒███  ████████    ███████   ██████
+   ▒██████████  ▒▒▒▒▒███ ▒▒███ ▒▒███▒▒███ ▒▒▒███▒    ███▒▒  ▒███   ▒███ ▒▒███▒▒███  ███▒▒███  ███▒▒███
+   ▒███▒▒▒▒▒▒    ███████  ▒███  ▒███ ▒███   ▒███    ▒▒█████ ▒███   ▒███  ▒███ ▒███ ▒███ ▒███ ▒███ ▒███
+   ▒███         ███▒▒███  ▒███  ▒███ ▒███   ▒███ ███ ▒▒▒▒███▒███   ▒███  ▒███ ▒███ ▒███ ▒███ ▒███ ▒███
+   █████       ▒▒████████ █████ ████ █████  ▒▒█████  ██████ ▒▒████████   ████ █████▒▒████████▒▒██████
+  ▒▒▒▒▒         ▒▒▒▒▒▒▒▒ ▒▒▒▒▒ ▒▒▒▒ ▒▒▒▒▒    ▒▒▒▒▒  ▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒   ▒▒▒▒ ▒▒▒▒▒  ▒▒▒▒▒▒▒▒  ▒▒▒▒▒▒
+"""
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def run(cmd, check=True, capture=False):
-    """Run a shell command, print it, and return CompletedProcess."""
-    print(f"  >> {' '.join(cmd) if isinstance(cmd, list) else cmd}")
+def run(cmd, check=True):
+    """Run a shell command, print it, return CompletedProcess."""
+    display = " ".join(cmd) if isinstance(cmd, list) else cmd
+    print(f"  >> {display}")
     return subprocess.run(
         cmd,
         check=check,
-        capture_output=capture,
         text=True,
         shell=IS_WINDOWS,
     )
 
 
 def conda_run(args, check=True):
-    """Run a command inside the paints_undo conda environment."""
-    cmd = ["conda", "run", "--no-capture-output", "-n", ENV_NAME] + args
-    return run(cmd, check=check)
+    """Run a command inside the paints_undo conda environment.
+    Output goes directly to terminal (not captured) so user sees live progress.
+    """
+    cmd = ["conda", "run", "-n", ENV_NAME] + args
+    display = " ".join(cmd) if isinstance(cmd, list) else cmd
+    print(f"  >> {display}")
+    return subprocess.run(
+        cmd,
+        check=check,
+        shell=IS_WINDOWS,
+        # No text=True, no stdout/stderr redirect — inherits parent terminal directly
+    )
+
+
+def conda_env_exists():
+    """Return True if the paints_undo conda env already exists."""
+    try:
+        result = subprocess.run(
+            ["conda", "env", "list"],
+            capture_output=True, text=True, check=True,
+            shell=IS_WINDOWS
+        )
+        return ENV_NAME in result.stdout
+    except Exception:
+        return False
 
 
 def section(title):
@@ -90,102 +137,174 @@ def section(title):
     print("=" * 60)
 
 
-def ok(msg):
-    print(f"  [OK] {msg}")
-
-
-def warn(msg):
-    print(f"  [WARN] {msg}")
+def ok(msg):   print(f"  [OK]   {msg}")
+def warn(msg): print(f"  [WARN] {msg}")
+def info(msg): print(f"  [INFO] {msg}")
 
 
 def error(msg):
+    print()
     print(f"  [ERROR] {msg}")
+    print()
     sys.exit(1)
+
+
+def ask_yes_no(prompt, default=True):
+    suffix = " [Y/n]: " if default else " [y/N]: "
+    raw = input(f"  {prompt}{suffix}").strip().lower()
+    if not raw:
+        return default
+    return raw in ("y", "yes")
 
 
 # ── GPU Detection ─────────────────────────────────────────────────────────────
 
-def detect_gpu():
+def detect_gpus():
     """
-    Use nvidia-smi to get the GPU compute capability.
-    Returns (major, minor) tuple or None if detection fails.
+    Use nvidia-smi to detect all NVIDIA GPUs.
+    Returns list of dicts: [{name, major, minor, vram_mb}]
+    Returns empty list if nvidia-smi not found or no GPUs detected.
     """
-    nvidia_smi = shutil.which("nvidia-smi")
-    if not nvidia_smi:
-        return None, None, "nvidia-smi not found"
+    if not shutil.which("nvidia-smi"):
+        return []
 
     try:
         result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name,compute_cap", "--format=csv,noheader"],
+            [
+                "nvidia-smi",
+                "--query-gpu=name,compute_cap,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
             capture_output=True, text=True, check=True
         )
-        line = result.stdout.strip().split("\n")[0]
-        parts = line.split(",")
-        if len(parts) < 2:
-            return None, None, f"Unexpected nvidia-smi output: {line}"
+        gpus = []
+        for line in result.stdout.strip().split("\n"):
+            if not line.strip():
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 3:
+                continue
+            name = parts[0]
+            cap  = parts[1]   # e.g. "8.9"
+            vram = parts[2]   # MiB as string
 
-        gpu_name = parts[0].strip()
-        cap = parts[1].strip()  # e.g. "8.9" or "12.0"
-        major, minor = cap.split(".")
-        return int(major), int(minor), gpu_name
+            major_s, minor_s = cap.split(".")
+            gpus.append({
+                "name":    name,
+                "major":   int(major_s),
+                "minor":   int(minor_s),
+                "vram_mb": int(vram),
+            })
+        return gpus
 
     except Exception as e:
-        return None, None, str(e)
+        warn(f"nvidia-smi query failed: {e}")
+        return []
 
 
 def pick_cuda_tag(major, minor):
     """
-    Given compute capability (major, minor), return the best matching cu tag.
-    Falls back to cu118 if nothing matches exactly.
+    Given compute capability, return best matching (cu_tag, description).
+    Picks the highest supported capability that is <= the detected one.
+    Falls back to cu118.
     """
-    # Try exact match first
     if (major, minor) in CUDA_MAP:
         return CUDA_MAP[(major, minor)]
 
-    # Find highest supported capability <= detected
-    best = None
-    best_cap = (0, 0)
-    for cap, info in CUDA_MAP.items():
+    best, best_cap = None, (0, 0)
+    for cap, entry in CUDA_MAP.items():
         if cap <= (major, minor) and cap > best_cap:
-            best = info
-            best_cap = cap
+            best, best_cap = entry, cap
 
-    if best:
-        return best
-
-    # Absolute fallback
-    return ("cu118", "CUDA 11.8 (fallback)")
+    return best if best else ("cu118", "CUDA 11.8 (fallback)")
 
 
-# ── Conda checks ─────────────────────────────────────────────────────────────
+def check_gpu():
+    """
+    Detect GPUs, print info, check VRAM, warn about unsupported vendors.
+    Returns (cu_tag, cu_desc) for the primary GPU.
+    """
+    section("GPU Detection")
+
+    # Check for non-NVIDIA GPU presence as a warning
+    if IS_LINUX:
+        try:
+            lspci = subprocess.run(["lspci"], capture_output=True, text=True, check=False)
+            if "AMD" in lspci.stdout or "Radeon" in lspci.stdout:
+                warn("AMD GPU detected. PaintsUndo requires an NVIDIA GPU.")
+                warn("AMD GPUs are not supported — CUDA is NVIDIA-only.")
+            if "Intel" in lspci.stdout and "VGA" in lspci.stdout:
+                warn("Intel integrated GPU detected. This is not sufficient for PaintsUndo.")
+        except Exception:
+            pass
+
+    gpus = detect_gpus()
+
+    if not gpus:
+        warn("No NVIDIA GPU detected via nvidia-smi.")
+        warn("Make sure NVIDIA drivers are installed and nvidia-smi is in PATH.")
+        warn("Falling back to CUDA 11.8 (cu118) — change manually if needed.")
+        return "cu118", "CUDA 11.8 (fallback — no GPU detected)"
+
+    # Print all detected GPUs
+    print(f"  Found {len(gpus)} GPU(s):")
+    for i, gpu in enumerate(gpus):
+        vram_gb = gpu["vram_mb"] / 1024
+        vram_str = f"{vram_gb:.1f} GB VRAM"
+        cap_str  = f"compute {gpu['major']}.{gpu['minor']}"
+        print(f"    GPU {i}: {gpu['name']} — {vram_str} — {cap_str}")
+
+    # Use GPU 0 (primary) for CUDA version selection
+    primary = gpus[0]
+    cu_tag, cu_desc = pick_cuda_tag(primary["major"], primary["minor"])
+
+    # VRAM check
+    vram_gb = primary["vram_mb"] / 1024
+    if vram_gb < MIN_VRAM_GB:
+        warn(f"Primary GPU has {vram_gb:.1f} GB VRAM.")
+        warn("PaintsUndo Step 2 (keyframes) needs ~10 GB minimum.")
+        warn("Step 1 (prompt generation) may still work.")
+    elif vram_gb < SOFT_VRAM_GB:
+        warn(f"Primary GPU has {vram_gb:.1f} GB VRAM.")
+        warn("Step 2 may run out of memory on some images. Try smaller resolutions.")
+    else:
+        ok(f"Primary GPU: {primary['name']} ({vram_gb:.1f} GB VRAM)")
+
+    ok(f"Selected PyTorch build: {cu_desc}")
+    return cu_tag, cu_desc
+
+
+# ── Prerequisites ─────────────────────────────────────────────────────────────
 
 def check_prereqs():
     section("Checking prerequisites")
 
+    # conda
     if not shutil.which("conda"):
         error(
             "conda not found in PATH.\n"
             "  Install Miniconda: https://docs.conda.io/en/latest/miniconda.html\n"
-            "  Then re-run this script from an Anaconda Prompt (Windows)\n"
-            "  or a terminal with conda initialized (Linux)."
+            "  Windows: run this script from Anaconda Prompt\n"
+            "  Linux:   run `conda init bash` then restart your terminal"
         )
     ok("conda found")
 
+    # git
     if not shutil.which("git"):
         error(
             "git not found in PATH.\n"
-            "  Install Git: https://git-scm.com/\n"
-            "  Then re-run this script."
+            "  Install Git from https://git-scm.com/ then re-run."
         )
     ok("git found")
 
-    # Accept conda TOS (newer Miniconda versions require this)
-    for channel in [
+    # Accept conda TOS (newer Miniconda requires this)
+    channels = [
         "https://repo.anaconda.com/pkgs/main",
         "https://repo.anaconda.com/pkgs/r",
         "https://repo.anaconda.com/pkgs/msys2",
-    ]:
-        run(["conda", "tos", "accept", "--override-channels", "--channel", channel], check=False)
+    ]
+    for ch in channels:
+        run(["conda", "tos", "accept", "--override-channels", "--channel", ch], check=False)
     ok("conda TOS accepted")
 
 
@@ -195,10 +314,14 @@ def clone_repo(install_dir: Path):
     section(f"Cloning Paints-UNDO to {install_dir}")
 
     if (install_dir / ".git").exists():
-        print("  Repo already exists - pulling latest changes.")
+        info("Repo already exists — pulling latest changes.")
         run(["git", "-C", str(install_dir), "pull"])
     else:
-        install_dir.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            install_dir.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            error(f"Cannot create install directory: {install_dir}\n  {e}\n  Check that the drive exists and you have write permission.")
+        info("Cloning repository (~3 MB)...")
         run(["git", "clone", REPO_URL, str(install_dir)])
 
     ok(f"Repo ready at {install_dir}")
@@ -207,30 +330,25 @@ def clone_repo(install_dir: Path):
 # ── Conda env ─────────────────────────────────────────────────────────────────
 
 def create_env():
-    section(f'Creating conda environment "{ENV_NAME}" (Python {PYTHON_VERSION})')
-    run(["conda", "create", "-n", ENV_NAME, f"python={PYTHON_VERSION}", "-y"])
-    ok("Environment ready")
+    section(f'Conda environment "{ENV_NAME}"')
+
+    if conda_env_exists():
+        info(f'Environment "{ENV_NAME}" already exists — skipping creation.')
+        info("To reinstall from scratch: conda env remove -n paints_undo")
+    else:
+        info(f"Creating environment with Python {PYTHON_VERSION}...")
+        run(["conda", "create", "-n", ENV_NAME, f"python={PYTHON_VERSION}", "-y"])
+        ok("Environment created")
 
 
 # ── PyTorch ───────────────────────────────────────────────────────────────────
 
-def install_pytorch():
-    section("Detecting GPU and installing PyTorch")
-
-    major, minor, gpu_info = detect_gpu()
-
-    if major is None:
-        warn(f"GPU detection failed: {gpu_info}")
-        warn("Falling back to CUDA 11.8 (cu118). If this is wrong, re-run and manually edit the index URL.")
-        cu_tag, cu_desc = "cu118", "CUDA 11.8 (fallback)"
-    else:
-        cu_tag, cu_desc = pick_cuda_tag(major, minor)
-        print(f"  Detected GPU: {gpu_info}")
-        print(f"  Compute capability: {major}.{minor}")
-        print(f"  Selected: {cu_desc}")
+def install_pytorch(cu_tag):
+    section("Installing PyTorch + xformers")
 
     index_url = f"{PYTORCH_INDEX_BASE}/{cu_tag}"
-    print(f"  PyTorch index URL: {index_url}")
+    info(f"Index URL: {index_url}")
+    info("Downloading PyTorch (~2.5 GB) — this may take several minutes...")
 
     conda_run(["pip", "install", "torch", "torchvision", "--index-url", index_url])
     conda_run(["pip", "install", "xformers", "--index-url", index_url])
@@ -241,30 +359,70 @@ def install_pytorch():
 
 def install_requirements():
     section("Installing requirements")
+    info("Installing pinned dependencies...")
     conda_run(["pip", "install"] + REQUIREMENTS)
     ok("Requirements installed")
 
 
+# ── Verify PyTorch ────────────────────────────────────────────────────────────
+
+VERIFY_SCRIPT = """
+import sys
+try:
+    import torch
+    cuda_ok = torch.cuda.is_available()
+    if cuda_ok:
+        name = torch.cuda.get_device_name(0)
+        vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        print(f"CUDA OK: {name} ({vram:.1f} GB)")
+    else:
+        print("CUDA NOT AVAILABLE - torch installed but GPU not accessible")
+        sys.exit(1)
+except ImportError:
+    print("torch not found")
+    sys.exit(1)
+"""
+
+def verify_pytorch(install_dir: Path):
+    section("Verifying PyTorch + CUDA")
+
+    verify_file = install_dir / "_verify_torch.py"
+    verify_file.write_text(VERIFY_SCRIPT, encoding="utf-8")
+
+    try:
+        result = conda_run(["python", str(verify_file)], check=False)
+        if result.returncode == 0:
+            ok("PyTorch CUDA verification passed.")
+        else:
+            warn("PyTorch CUDA verification failed.")
+            warn("PaintsUndo may not be able to use your GPU.")
+            warn("Check that your NVIDIA drivers are up to date.")
+    except Exception as e:
+        warn(f"Verification step failed: {e}")
+    finally:
+        verify_file.unlink(missing_ok=True)
+
+
 # ── Patches ───────────────────────────────────────────────────────────────────
 
-GRADIO_APP_PATCH = """
+GRADIO_APP_PATCH = r"""
 import re, sys
 path = sys.argv[1]
 content = open(path, 'r', encoding='utf-8').read()
 patched = re.sub(
-    r"block\\.queue\\(\\)\\.launch\\([^)]*\\)",
+    r"block\.queue\(\)\.launch\([^)]*\)",
     "block.queue().launch(server_name='127.0.0.1', share=False)",
     content
 )
 if patched == content:
-    print('  gradio_app.py: nothing to patch (already patched or pattern not found)')
+    print('  gradio_app.py: already patched or pattern not found')
 else:
     open(path, 'w', encoding='utf-8').write(patched)
-    print('  gradio_app.py: patched server_name to 127.0.0.1')
+    print('  gradio_app.py: patched server_name -> 127.0.0.1')
 """
 
 GRADIO_CLIENT_PATCH = """
-import sys, os
+import os
 import gradio_client
 base = os.path.dirname(gradio_client.__file__)
 path = os.path.join(base, 'utils.py')
@@ -295,27 +453,25 @@ if changed:
     open(path, 'w', encoding='utf-8').write(content)
     print('  gradio_client/utils.py: boolean schema bug patched')
 else:
-    print('  gradio_client/utils.py: already patched or pattern not found')
+    print('  gradio_client/utils.py: already patched')
 """
 
 
 def apply_patches(install_dir: Path):
     section("Applying patches")
 
-    # Write patch scripts to temp files
-    patch_app = install_dir / "_patch_gradio_app.py"
+    patch_app    = install_dir / "_patch_gradio_app.py"
     patch_client = install_dir / "_patch_gradio_client.py"
 
     patch_app.write_text(GRADIO_APP_PATCH, encoding="utf-8")
     patch_client.write_text(GRADIO_CLIENT_PATCH, encoding="utf-8")
 
-    gradio_app = install_dir / "gradio_app.py"
-    conda_run(["python", str(patch_app), str(gradio_app)])
-    conda_run(["python", str(patch_client)])
-
-    # Clean up temp patch files
-    patch_app.unlink(missing_ok=True)
-    patch_client.unlink(missing_ok=True)
+    try:
+        conda_run(["python", str(patch_app), str(install_dir / "gradio_app.py")])
+        conda_run(["python", str(patch_client)])
+    finally:
+        patch_app.unlink(missing_ok=True)
+        patch_client.unlink(missing_ok=True)
 
     ok("Patches applied")
 
@@ -325,57 +481,74 @@ def apply_patches(install_dir: Path):
 def write_launch_script(install_dir: Path):
     section("Writing launch script")
 
+    # Write banner helper so start scripts can print it via Python
+    banner_file = install_dir / "_banner.py"
+    banner_file.write_text(
+        f'BANNER = {repr(BANNER)}\n'
+        'if __name__ == "__main__":\n'
+        '    import sys\n'
+        '    if hasattr(sys.stdout, "reconfigure"):\n'
+        '        sys.stdout.reconfigure(encoding="utf-8", errors="replace")\n'
+        '    print(BANNER)\n',
+        encoding="utf-8"
+    )
+
     if IS_WINDOWS:
-        launch_path = install_dir / "run_paints_undo.bat"
-        launch_path.write_text(
+        path = install_dir / "start.bat"
+        path.write_text(
             "@echo off\n"
             "title PaintsUndo\n"
             f'cd /d "{install_dir}"\n'
-            "echo Starting PaintsUndo...\n"
-            "echo Models download automatically on first run (~8-10GB)\n"
-            "echo Gradio UI will open at http://127.0.0.1:7860\n"
+            "chcp 65001 >nul\n"
+            f"conda run -n {ENV_NAME} python _banner.py\n"
             "echo.\n"
-            f"conda activate {ENV_NAME}\n"
-            "python gradio_app.py\n"
+            "echo   Open your browser to: http://127.0.0.1:7860\n"
+            "echo   Models download automatically on first run (~8-10 GB)\n"
+            "echo.\n"
+            f"conda run -n {ENV_NAME} python gradio_app.py\n"
             "pause\n",
             encoding="utf-8"
         )
-        ok(f"Launch script written: {launch_path}")
     else:
-        launch_path = install_dir / "run_paints_undo.sh"
-        launch_path.write_text(
+        path = install_dir / "start.sh"
+        path.write_text(
             "#!/bin/bash\n"
             f'cd "{install_dir}"\n'
-            "echo Starting PaintsUndo...\n"
-            "echo Models download automatically on first run (~8-10GB)\n"
-            "echo Gradio UI will open at http://127.0.0.1:7860\n"
-            f"conda activate {ENV_NAME}\n"
-            "python gradio_app.py\n",
+            "python3 _banner.py 2>/dev/null || echo '  PaintsUndo'\n"
+            "echo\n"
+            "echo '  Open your browser to: http://127.0.0.1:7860'\n"
+            "echo '  Models download automatically on first run (~8-10 GB)'\n"
+            "echo\n"
+            "CONDA_BASE=$(conda info --base 2>/dev/null)\n"
+            'if [ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then\n'
+            '    source "$CONDA_BASE/etc/profile.d/conda.sh"\n'
+            f"    conda activate {ENV_NAME}\n"
+            "    python gradio_app.py\n"
+            "else\n"
+            f"    conda run -n {ENV_NAME} python gradio_app.py\n"
+            "fi\n",
             encoding="utf-8"
         )
-        launch_path.chmod(0o755)
-        ok(f"Launch script written: {launch_path}")
+        path.chmod(0o755)
+
+    ok(f"Launch script written: {path}")
+    return path
 
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
-def print_summary(install_dir: Path):
-    launch = "run_paints_undo.bat" if IS_WINDOWS else "run_paints_undo.sh"
+def print_summary(install_dir: Path, launch_path: Path):
     print()
     print("=" * 60)
     print("  Setup complete!")
     print()
-    print("  First launch downloads ~8-10GB of models:")
+    print("  First launch will download ~8-10 GB of models:")
     print("    - lllyasviel/paints_undo_single_frame")
     print("    - lllyasviel/paints_undo_multi_frame")
     print(f"  Models saved to: {install_dir / 'hf_download'}")
     print()
     print("  To launch:")
-    print(f"    {install_dir / launch}")
-    print("  OR manually:")
-    print(f"    conda activate {ENV_NAME}")
-    print(f"    cd {install_dir}")
-    print("    python gradio_app.py")
+    print(f"    {launch_path}")
     print()
     print("  Then open: http://127.0.0.1:7860")
     print("=" * 60)
@@ -385,46 +558,78 @@ def print_summary(install_dir: Path):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="PaintsUndo setup script")
+    parser = argparse.ArgumentParser(
+        description="PaintsUndo cross-platform setup script"
+    )
     parser.add_argument(
         "--install-dir",
         type=str,
         default=None,
-        help="Directory to install PaintsUndo into (default: prompted interactively)",
+        help="Where to install PaintsUndo (prompted if not given)",
+    )
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="Re-apply patches to an existing install without reinstalling",
     )
     args = parser.parse_args()
 
+    print(BANNER)
+    print(f"  Setup  |  Python {sys.version.split()[0]}  |  {platform.system()}")
     print()
-    print("=" * 60)
-    print("  PaintsUndo Setup")
-    print("=" * 60)
 
     # Get install directory
     if args.install_dir:
-        install_dir = Path(args.install_dir)
+        install_dir = Path(args.install_dir).expanduser().resolve()
     else:
         print()
-        print("  Where would you like to install PaintsUndo?")
-        if IS_WINDOWS:
-            print("  Examples: H:\\PaintsUndo   C:\\AI\\PaintsUndo")
+        if args.update:
+            print("  Where is your existing PaintsUndo install?")
         else:
-            print("  Examples: /home/user/PaintsUndo   ~/AI/PaintsUndo")
+            print("  Where would you like to install PaintsUndo?")
+        if IS_WINDOWS:
+            print("  Examples:  H:\\PaintsUndo    C:\\AI\\PaintsUndo")
+        else:
+            print("  Examples:  ~/PaintsUndo    /opt/PaintsUndo")
         print()
         raw = input("  Install path: ").strip()
         if not raw:
             error("No path entered.")
-        install_dir = Path(raw)
+        install_dir = Path(raw).expanduser().resolve()
 
     print(f"\n  Install location: {install_dir}")
 
+    # Update-only mode — just re-apply patches
+    if args.update:
+        if not (install_dir / "gradio_app.py").exists():
+            error(f"No PaintsUndo install found at {install_dir}")
+        if not conda_env_exists():
+            error(f'Conda environment "{ENV_NAME}" not found. Run setup.py without --update first.')
+        apply_patches(install_dir)
+        ok("Update complete.")
+        return
+
+    # Full install
     check_prereqs()
+    cu_tag, _ = check_gpu()
     clone_repo(install_dir)
     create_env()
-    install_pytorch()
+    install_pytorch(cu_tag)
     install_requirements()
+    verify_pytorch(install_dir)
     apply_patches(install_dir)
-    write_launch_script(install_dir)
-    print_summary(install_dir)
+    launch_path = write_launch_script(install_dir)
+    print_summary(install_dir, launch_path)
+
+    # Offer to launch immediately
+    print()
+    if ask_yes_no("Launch PaintsUndo now?"):
+        print()
+        info("Starting PaintsUndo — open http://127.0.0.1:7860 in your browser")
+        info("Models will download on first use (~8-10 GB)")
+        print()
+        os.chdir(install_dir)
+        conda_run(["python", "gradio_app.py"])
 
 
 if __name__ == "__main__":
