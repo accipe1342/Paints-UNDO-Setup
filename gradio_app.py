@@ -6,8 +6,8 @@ os.makedirs(result_dir, exist_ok=True)
 
 
 import functools
-import os
 import random
+import zipfile
 import gradio as gr
 import numpy as np
 import torch
@@ -237,6 +237,28 @@ def process_video(keyframes, prompt, steps, cfg, fps, seed, progress=gr.Progress
     return output_filename, video
 
 
+def download_gallery_images(gallery, prefix):
+    """Save all gallery images to a zip file and return the path for download."""
+    if not gallery:
+        return None
+    uuid_name = str(uuid.uuid4())
+    zip_path = os.path.join(result_dir, f'{prefix}_{uuid_name}.zip')
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for i, item in enumerate(gallery):
+            # Gallery items are (filepath, caption) tuples or just filepaths
+            filepath = item[0] if isinstance(item, (list, tuple)) else item
+            if filepath and os.path.exists(filepath):
+                ext = os.path.splitext(filepath)[1] or '.png'
+                zf.write(filepath, f'{prefix}_{i:04d}{ext}')
+            elif isinstance(filepath, np.ndarray):
+                img = Image.fromarray(filepath.astype(np.uint8))
+                img_path = os.path.join(result_dir, f'_tmp_{uuid_name}_{i}.png')
+                img.save(img_path)
+                zf.write(img_path, f'{prefix}_{i:04d}.png')
+                os.remove(img_path)
+    return zip_path
+
+
 block = gr.Blocks().queue()
 with block:
     gr.Markdown('# Paints-Undo')
@@ -265,13 +287,12 @@ with block:
             with gr.Column():
                 key_gen_button = gr.Button(value="Generate Key Frames", interactive=False)
                 result_gallery = gr.Gallery(height=512, object_fit='contain', label='Outputs', columns=4)
+                keyframe_download_btn = gr.Button(value="⬇ Download All Key Frames", interactive=False)
+                keyframe_download_file = gr.File(label="Key Frames ZIP", visible=False)
 
     with gr.Accordion(label='Step 3: Generate All Videos', open=True):
         with gr.Row():
             with gr.Column():
-                # Note that, at "Step 3: Generate All Videos", using "1girl, masterpiece, best quality"
-                # or "1boy, masterpiece, best quality" or just "masterpiece, best quality" leads to better results.
-                # Do NOT modify this to use the prompts generated from Step 1 !!
                 i2v_input_text = gr.Text(label='Prompts', value='1girl, masterpiece, best quality')
                 i2v_seed = gr.Slider(label='Stage 2 Seed', minimum=0, maximum=50000, step=1, value=123)
                 i2v_cfg_scale = gr.Slider(minimum=1.0, maximum=15.0, step=0.5, label='CFG Scale', value=7.5,
@@ -285,28 +306,64 @@ with block:
                                             show_share_button=True, height=512)
         with gr.Row():
             i2v_output_images = gr.Gallery(height=512, label="Output Frames", object_fit="contain", columns=8)
+        with gr.Row():
+            output_frames_download_btn = gr.Button(value="⬇ Download All Output Frames", interactive=False)
+            output_frames_download_file = gr.File(label="Output Frames ZIP", visible=False)
 
-    input_fg.change(lambda: ["", gr.update(interactive=True), gr.update(interactive=False), gr.update(interactive=False)],
-                    outputs=[prompt, prompt_gen_button, key_gen_button, i2v_end_btn])
+    # ── Events ────────────────────────────────────────────────────────────────
+
+    input_fg.change(
+        lambda: ["", gr.update(interactive=True), gr.update(interactive=False),
+                 gr.update(interactive=False), gr.update(interactive=False)],
+        outputs=[prompt, prompt_gen_button, key_gen_button, i2v_end_btn, keyframe_download_btn]
+    )
 
     prompt_gen_button.click(
         fn=interrogator_process,
         inputs=[input_fg],
         outputs=[prompt]
-    ).then(lambda: [gr.update(interactive=True), gr.update(interactive=True), gr.update(interactive=False)],
-           outputs=[prompt_gen_button, key_gen_button, i2v_end_btn])
+    ).then(
+        lambda: [gr.update(interactive=True), gr.update(interactive=True), gr.update(interactive=False)],
+        outputs=[prompt_gen_button, key_gen_button, i2v_end_btn]
+    )
 
     key_gen_button.click(
         fn=process,
         inputs=[input_fg, prompt, input_undo_steps, image_width, image_height, seed, steps, n_prompt, cfg],
         outputs=[result_gallery]
-    ).then(lambda: [gr.update(interactive=True), gr.update(interactive=True), gr.update(interactive=True)],
-           outputs=[prompt_gen_button, key_gen_button, i2v_end_btn])
+    ).then(
+        lambda: [gr.update(interactive=True), gr.update(interactive=True),
+                 gr.update(interactive=True), gr.update(interactive=True)],
+        outputs=[prompt_gen_button, key_gen_button, i2v_end_btn, keyframe_download_btn]
+    )
+
+    keyframe_download_btn.click(
+        fn=lambda g: download_gallery_images(g, 'keyframe'),
+        inputs=[result_gallery],
+        outputs=[keyframe_download_file]
+    ).then(
+        fn=lambda path: gr.update(visible=path is not None),
+        inputs=[keyframe_download_file],
+        outputs=[keyframe_download_file]
+    )
 
     i2v_end_btn.click(
         inputs=[result_gallery, i2v_input_text, i2v_steps, i2v_cfg_scale, i2v_fps, i2v_seed],
         outputs=[i2v_output_video, i2v_output_images],
         fn=process_video
+    ).then(
+        lambda: gr.update(interactive=True),
+        outputs=[output_frames_download_btn]
+    )
+
+    output_frames_download_btn.click(
+        fn=lambda g: download_gallery_images(g, 'output_frame'),
+        inputs=[i2v_output_images],
+        outputs=[output_frames_download_file]
+    ).then(
+        fn=lambda path: gr.update(visible=path is not None),
+        inputs=[output_frames_download_file],
+        outputs=[output_frames_download_file]
     )
 
     dbs = [
@@ -321,4 +378,4 @@ with block:
         examples_per_page=1024
     )
 
-block.queue().launch(server_name='0.0.0.0')
+block.queue().launch(server_name='127.0.0.1', share=False)

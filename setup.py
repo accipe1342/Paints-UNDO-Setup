@@ -70,6 +70,8 @@ REQUIREMENTS = [
     "einops",
     "onnxruntime",
     "av",
+    "imageio",
+    "imageio-ffmpeg",
 ]
 
 IS_WINDOWS = platform.system() == "Windows"
@@ -456,22 +458,131 @@ else:
     print('  gradio_client/utils.py: already patched')
 """
 
+VAE_PATCH = r"""
+import sys
+path = sys.argv[1]
+content = open(path, 'r', encoding='utf-8').read()
+
+OLD = '''def chunked_attention(q, k, v, batch_chunk=0):
+    # if batch_chunk > 0 and not torch.is_grad_enabled():
+    #     batch_size = q.size(0)
+    #     chunks = [slice(i, i + batch_chunk) for i in range(0, batch_size, batch_chunk)]
+    #
+    #     out_chunks = []
+    #     for chunk in chunks:
+    #         q_chunk = q[chunk]
+    #         k_chunk = k[chunk]
+    #         v_chunk = v[chunk]
+    #
+    #         out_chunk = torch.nn.functional.scaled_dot_product_attention(
+    #             q_chunk, k_chunk, v_chunk, attn_mask=None
+    #         )
+    #         out_chunks.append(out_chunk)
+    #
+    #     out = torch.cat(out_chunks, dim=0)
+    # else:
+    #     out = torch.nn.functional.scaled_dot_product_attention(
+    #         q, k, v, attn_mask=None
+    #     )
+    out = xformers.ops.memory_efficient_attention(q, k, v)
+    return out'''
+
+NEW = '''def chunked_attention(q, k, v, batch_chunk=0):
+    try:
+        out = xformers.ops.memory_efficient_attention(q, k, v)
+    except Exception:
+        # Fall back to chunked scaled_dot_product_attention to avoid OOM
+        chunk_size = 256
+        out_chunks = []
+        for i in range(0, q.shape[0], chunk_size):
+            q_c = q[i:i + chunk_size].unsqueeze(1)
+            k_c = k[i:i + chunk_size].unsqueeze(1)
+            v_c = v[i:i + chunk_size].unsqueeze(1)
+            out_chunks.append(
+                torch.nn.functional.scaled_dot_product_attention(
+                    q_c, k_c, v_c, attn_mask=None
+                ).squeeze(1)
+            )
+        out = torch.cat(out_chunks, dim=0)
+    return out'''
+
+if OLD in content and NEW not in content:
+    content = content.replace(OLD, NEW)
+    open(path, 'w', encoding='utf-8').write(content)
+    print('  diffusers_vdm/vae.py: xformers fallback + chunked OOM fix applied')
+else:
+    print('  diffusers_vdm/vae.py: already patched or pattern not found')
+"""
+
+ATTENTION_PATCH = r"""
+import sys
+path = sys.argv[1]
+content = open(path, 'r', encoding='utf-8').read()
+
+OLD = '    out = xformers.ops.memory_efficient_attention(q, k, v)\n\n    out = ('
+NEW = '''    try:
+        out = xformers.ops.memory_efficient_attention(q, k, v)
+    except Exception:
+        q_t = q.unsqueeze(1)
+        k_t = k.unsqueeze(1)
+        v_t = v.unsqueeze(1)
+        out = F.scaled_dot_product_attention(q_t, k_t, v_t).squeeze(1)
+
+    out = ('''
+
+if OLD in content and NEW not in content:
+    content = content.replace(OLD, NEW)
+    open(path, 'w', encoding='utf-8').write(content)
+    print('  diffusers_vdm/attention.py: xformers fallback applied')
+else:
+    print('  diffusers_vdm/attention.py: already patched or pattern not found')
+"""
+
+UTILS_PATCH = r"""
+import sys
+path = sys.argv[1]
+content = open(path, 'r', encoding='utf-8').read()
+
+OLD = '    torchvision.io.write_video(output_filename, x, fps=fps, video_codec=\'h264\', options={\'crf\': \'1\'})'
+NEW = '''    import imageio
+    imageio.mimwrite(output_filename, x.numpy(), fps=fps, codec='h264', quality=9)'''
+
+if OLD in content and NEW not in content:
+    content = content.replace(OLD, NEW)
+    open(path, 'w', encoding='utf-8').write(content)
+    print('  diffusers_vdm/utils.py: write_video -> imageio patch applied')
+else:
+    print('  diffusers_vdm/utils.py: already patched or pattern not found')
+"""
+
 
 def apply_patches(install_dir: Path):
     section("Applying patches")
 
-    patch_app    = install_dir / "_patch_gradio_app.py"
-    patch_client = install_dir / "_patch_gradio_client.py"
+    patch_app        = install_dir / "_patch_gradio_app.py"
+    patch_client     = install_dir / "_patch_gradio_client.py"
+    patch_vae        = install_dir / "_patch_vae.py"
+    patch_attention  = install_dir / "_patch_attention.py"
+    patch_utils      = install_dir / "_patch_utils.py"
 
     patch_app.write_text(GRADIO_APP_PATCH, encoding="utf-8")
     patch_client.write_text(GRADIO_CLIENT_PATCH, encoding="utf-8")
+    patch_vae.write_text(VAE_PATCH, encoding="utf-8")
+    patch_attention.write_text(ATTENTION_PATCH, encoding="utf-8")
+    patch_utils.write_text(UTILS_PATCH, encoding="utf-8")
 
     try:
-        conda_run(["python", str(patch_app), str(install_dir / "gradio_app.py")])
+        conda_run(["python", str(patch_app),       str(install_dir / "gradio_app.py")])
         conda_run(["python", str(patch_client)])
+        conda_run(["python", str(patch_vae),       str(install_dir / "diffusers_vdm" / "vae.py")])
+        conda_run(["python", str(patch_attention), str(install_dir / "diffusers_vdm" / "attention.py")])
+        conda_run(["python", str(patch_utils),     str(install_dir / "diffusers_vdm" / "utils.py")])
     finally:
         patch_app.unlink(missing_ok=True)
         patch_client.unlink(missing_ok=True)
+        patch_vae.unlink(missing_ok=True)
+        patch_attention.unlink(missing_ok=True)
+        patch_utils.unlink(missing_ok=True)
 
     ok("Patches applied")
 

@@ -7,6 +7,8 @@ This is a fork of [lllyasviel/Paints-UNDO](https://github.com/lllyasviel/Paints-
 - `setup.py` — one-command install that auto-detects your GPU and installs the correct PyTorch CUDA version
 - Fixes a `gradio_client` bug that causes UI buttons to be greyed out (`APIInfoParseError: Cannot parse schema True`)
 - Fixes a localhost binding issue that prevents the Gradio UI from loading
+- Fixes Step 3 video generation on RTX 5000 series (and other GPUs where xformers lacks CUDA support) by patching `diffusers_vdm/vae.py` and `diffusers_vdm/attention.py` to fall back to PyTorch native attention
+- Fixes Step 3 video saving which fails on newer torchvision versions (`write_video` missing) by switching to `imageio`
 - Pins dependency versions known to work together
 - Verifies PyTorch can see your GPU after install
 - Warns if your VRAM is too low before you start
@@ -55,7 +57,7 @@ Then open `http://127.0.0.1:7860` in your browser.
 
 **Step 2** — Click Generate Key Frames. Default operation steps (400, 600, 800, 900, 950, 999) work well. Steps 900 and 950 produce the most useful loose gesture sketches.
 
-**Step 3** — Video interpolation between keyframes. Skip this if you only need keyframe images or have less than 12 GB VRAM.
+**Step 3** — Video interpolation between keyframes. Works on all supported GPUs. May still OOM on cards with less than 12 GB VRAM — if so, reduce Image Width and Height in Step 2 before generating.
 
 ## Updating patches
 
@@ -84,8 +86,8 @@ You need to run the script from an Anaconda Prompt on Windows, or a terminal whe
 **OOM on Step 2**
 Reduce Image Width and Height in the UI. Try 448x448 instead of 512x512.
 
-**Step 3 fails on RTX 5000 series**
-Known issue — xformers does not support compute capability 12.0 for the video model. Steps 1 and 2 work fine. Skip Step 3.
+**Step 3 OOM error**
+Reduce Image Width and Height in the UI in Step 2 before running Step 3. Try 384x448 instead of 512x640.
 
 **WSL (Windows Subsystem for Linux)**
 Not recommended. Run natively on Windows instead for best GPU support.
