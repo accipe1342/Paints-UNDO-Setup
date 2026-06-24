@@ -32,14 +32,20 @@ This is a fork of [lllyasviel/Paints-UNDO](https://github.com/lllyasviel/Paints-
 
 ## Install
 
+**Windows (easiest) — double-click `setup.bat`.** It finds conda automatically (even if it is not on your PATH), then runs the installer. You will be prompted for an install location.
+
+**From a terminal (any platform):**
 ```
 python setup.py
 ```
 
 You will be prompted for an install location. Everything else is automatic.
 
+> On Windows, run `setup.py` from an **Anaconda Prompt** (or just use `setup.bat`). Double-clicking `setup.py` directly will fail because conda is not on PATH.
+
 **Or specify the path directly:**
 ```
+setup.bat --install-dir C:\AI\PaintsUndo
 python setup.py --install-dir C:\AI\PaintsUndo
 python setup.py --install-dir ~/PaintsUndo
 ```
