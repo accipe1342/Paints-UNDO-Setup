@@ -411,20 +411,23 @@ GRADIO_APP_PATCH = r"""
 import re, sys
 path = sys.argv[1]
 content = open(path, 'r', encoding='utf-8').read()
+if "server_name='127.0.0.1'" in content:
+    print('  gradio_app.py: already patched')
+    sys.exit(0)
 patched = re.sub(
     r"block\.queue\(\)\.launch\([^)]*\)",
     "block.queue().launch(server_name='127.0.0.1', share=False)",
     content
 )
 if patched == content:
-    print('  gradio_app.py: already patched or pattern not found')
-else:
-    open(path, 'w', encoding='utf-8').write(patched)
-    print('  gradio_app.py: patched server_name -> 127.0.0.1')
+    print('  gradio_app.py: PATTERN NOT FOUND -- launch() call not located')
+    sys.exit(2)
+open(path, 'w', encoding='utf-8').write(patched)
+print('  gradio_app.py: patched server_name -> 127.0.0.1')
 """
 
 GRADIO_CLIENT_PATCH = """
-import os
+import os, sys
 import gradio_client
 base = os.path.dirname(gradio_client.__file__)
 path = os.path.join(base, 'utils.py')
@@ -454,8 +457,14 @@ for old, new in patches:
 if changed:
     open(path, 'w', encoding='utf-8').write(content)
     print('  gradio_client/utils.py: boolean schema bug patched')
-else:
+    sys.exit(0)
+
+if all(new in content for old, new in patches):
     print('  gradio_client/utils.py: already patched')
+    sys.exit(0)
+else:
+    print('  gradio_client/utils.py: PATTERN NOT FOUND -- gradio_client version may differ')
+    sys.exit(2)
 """
 
 VAE_PATCH = r"""
@@ -506,12 +515,17 @@ NEW = '''def chunked_attention(q, k, v, batch_chunk=0):
         out = torch.cat(out_chunks, dim=0)
     return out'''
 
-if OLD in content and NEW not in content:
+if NEW in content:
+    print('  diffusers_vdm/vae.py: already patched')
+    sys.exit(0)
+elif OLD in content:
     content = content.replace(OLD, NEW)
     open(path, 'w', encoding='utf-8').write(content)
     print('  diffusers_vdm/vae.py: xformers fallback + chunked OOM fix applied')
+    sys.exit(0)
 else:
-    print('  diffusers_vdm/vae.py: already patched or pattern not found')
+    print('  diffusers_vdm/vae.py: PATTERN NOT FOUND -- vae.py source differs')
+    sys.exit(2)
 """
 
 ATTENTION_PATCH = r"""
@@ -530,12 +544,17 @@ NEW = '''    try:
 
     out = ('''
 
-if OLD in content and NEW not in content:
+if NEW in content:
+    print('  diffusers_vdm/attention.py: already patched')
+    sys.exit(0)
+elif OLD in content:
     content = content.replace(OLD, NEW)
     open(path, 'w', encoding='utf-8').write(content)
     print('  diffusers_vdm/attention.py: xformers fallback applied')
+    sys.exit(0)
 else:
-    print('  diffusers_vdm/attention.py: already patched or pattern not found')
+    print('  diffusers_vdm/attention.py: PATTERN NOT FOUND -- attention.py source differs')
+    sys.exit(2)
 """
 
 UTILS_PATCH = r"""
@@ -547,12 +566,17 @@ OLD = '    torchvision.io.write_video(output_filename, x, fps=fps, video_codec=\
 NEW = '''    import imageio
     imageio.mimwrite(output_filename, x.numpy(), fps=fps, codec='h264', quality=9)'''
 
-if OLD in content and NEW not in content:
+if NEW in content:
+    print('  diffusers_vdm/utils.py: already patched')
+    sys.exit(0)
+elif OLD in content:
     content = content.replace(OLD, NEW)
     open(path, 'w', encoding='utf-8').write(content)
     print('  diffusers_vdm/utils.py: write_video -> imageio patch applied')
+    sys.exit(0)
 else:
-    print('  diffusers_vdm/utils.py: already patched or pattern not found')
+    print('  diffusers_vdm/utils.py: PATTERN NOT FOUND -- utils.py source differs')
+    sys.exit(2)
 """
 
 
@@ -571,12 +595,13 @@ def apply_patches(install_dir: Path):
     patch_attention.write_text(ATTENTION_PATCH, encoding="utf-8")
     patch_utils.write_text(UTILS_PATCH, encoding="utf-8")
 
+    results = {}
     try:
-        conda_run(["python", str(patch_app),       str(install_dir / "gradio_app.py")])
-        conda_run(["python", str(patch_client)])
-        conda_run(["python", str(patch_vae),       str(install_dir / "diffusers_vdm" / "vae.py")])
-        conda_run(["python", str(patch_attention), str(install_dir / "diffusers_vdm" / "attention.py")])
-        conda_run(["python", str(patch_utils),     str(install_dir / "diffusers_vdm" / "utils.py")])
+        results["gradio_app.py"]              = conda_run(["python", str(patch_app),       str(install_dir / "gradio_app.py")], check=False).returncode
+        results["gradio_client/utils.py"]     = conda_run(["python", str(patch_client)], check=False).returncode
+        results["diffusers_vdm/vae.py"]       = conda_run(["python", str(patch_vae),       str(install_dir / "diffusers_vdm" / "vae.py")], check=False).returncode
+        results["diffusers_vdm/attention.py"] = conda_run(["python", str(patch_attention), str(install_dir / "diffusers_vdm" / "attention.py")], check=False).returncode
+        results["diffusers_vdm/utils.py"]     = conda_run(["python", str(patch_utils),     str(install_dir / "diffusers_vdm" / "utils.py")], check=False).returncode
     finally:
         patch_app.unlink(missing_ok=True)
         patch_client.unlink(missing_ok=True)
@@ -584,7 +609,18 @@ def apply_patches(install_dir: Path):
         patch_attention.unlink(missing_ok=True)
         patch_utils.unlink(missing_ok=True)
 
-    ok("Patches applied")
+    # Exit code 2 from a patch script means its target pattern was not found.
+    failed = [name for name, rc in results.items() if rc == 2]
+    if failed:
+        warn("Some patches did NOT apply (pattern not found):")
+        for name in failed:
+            warn(f"  - {name}")
+        warn("This usually means an installed package or source file differs from")
+        warn("the tested versions. The UI or Step 3 video export may not work.")
+        warn("Check that the pinned versions in setup.py were installed, then")
+        warn("re-run:  python setup.py --update --install-dir <your install dir>")
+    else:
+        ok("All patches applied (or already present)")
 
 
 # ── Launch script ─────────────────────────────────────────────────────────────

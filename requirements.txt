@@ -1,17 +1,31 @@
+# NOTE: This file is for reference / manual installs only.
+# The recommended installer is setup.py, which installs the SAME pins below
+# itself, and additionally installs torch / torchvision / xformers from the
+# correct CUDA index URL for your detected GPU. Do NOT `pip install torch`
+# from this file -- you may get a CPU-only or mismatched build.
+#
+# These pins are kept in sync with the REQUIREMENTS list in setup.py.
+# If you change one, change the other.
+
+huggingface_hub==0.23.4
 diffusers==0.28.0
 transformers==4.41.1
-gradio==4.31.5
+gradio==4.26.0
+gradio-client==0.15.1
+starlette==0.27.0
 bitsandbytes==0.43.1
 accelerate==0.30.1
+peft==0.11.1
 protobuf==3.20
 opencv-python
 tensorboardX
 safetensors
 pillow
 einops
-torch
-peft
-xformers
 onnxruntime
 av
-torchvision
+imageio
+imageio-ffmpeg
+
+# torch, torchvision, xformers are installed by setup.py from
+# https://download.pytorch.org/whl/<cuXXX> -- see install_pytorch().
