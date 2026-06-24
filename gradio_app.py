@@ -237,6 +237,12 @@ def process_video(keyframes, prompt, steps, cfg, fps, seed, progress=gr.Progress
     if not keyframes or len(keyframes) < 2:
         raise gr.Error('Generate key frames first -- at least 2 are needed to make a video.')
 
+    # Belt-and-suspenders: make sure the WD tagger isn't still holding GPU VRAM
+    # going into the heavy Step 3 video stage. Step 1 already releases it, but
+    # free it here too in case tagging was kept loaded or skipped this session.
+    if os.environ.get('PAINTS_UNDO_TAGGER_KEEP_LOADED', '0') != '1':
+        wd14tagger.release()
+
     result_frames = []
     cropped_images = []
 

@@ -36,6 +36,13 @@ def movable_bnb_model(m):
     return
 
 
+def _module_on_gpu(m):
+    try:
+        return next(m.parameters()).device.type == 'cuda'
+    except StopIteration:
+        return True  # no parameters -> nothing to move
+
+
 def load_models_to_gpu(models):
     global models_in_gpu
 
@@ -43,7 +50,6 @@ def load_models_to_gpu(models):
         models = [models]
 
     models_to_remain = [m for m in set(models) if m in models_in_gpu]
-    models_to_load = [m for m in set(models) if m not in models_in_gpu]
     models_to_unload = [m for m in set(models_in_gpu) if m not in models_to_remain]
 
     if not high_vram:
@@ -53,12 +59,16 @@ def load_models_to_gpu(models):
             print('Unload to CPU:', m.__class__.__name__)
         models_in_gpu = models_to_remain
 
-    for m in models_to_load:
-        with movable_bnb_model(m):
-            m.to(gpu)
-        print('Load to GPU:', m.__class__.__name__)
+    # Load by actual device, not the tracking list. In high-VRAM mode the
+    # startup bookkeeping can mark models as resident before they are physically
+    # moved; checking the real device guarantees they end up on the GPU.
+    for m in set(models):
+        if not _module_on_gpu(m):
+            with movable_bnb_model(m):
+                m.to(gpu)
+            print('Load to GPU:', m.__class__.__name__)
 
-    models_in_gpu = list(set(models_in_gpu + models))
+    models_in_gpu = list(set(models_in_gpu + list(models)))
     torch.cuda.empty_cache()
     return
 

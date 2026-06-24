@@ -34,7 +34,7 @@ if sys.version_info < (3, 7):
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-REPO_URL  = "https://github.com/lllyasviel/Paints-UNDO.git"
+REPO_URL  = "https://github.com/accipe1342/Paints-UNDO-Setup.git"
 ENV_NAME  = "paints_undo"
 PYTHON_VERSION = "3.10"
 MIN_VRAM_GB  = 8   # hard warning threshold — below this Step 2 will almost certainly fail

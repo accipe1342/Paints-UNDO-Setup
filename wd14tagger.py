@@ -51,6 +51,19 @@ DEFAULT_TAGGERS = ['eva02-large-v3', 'vit-large-v3']
 _loaded = {}  # key -> (InferenceSession, [(name, category), ...])
 
 
+def release():
+    """Free all loaded tagger ONNX sessions and reclaim their GPU VRAM.
+    Called automatically after each Step 1 run so the heavy diffusion stages
+    (especially Step 3 video) get the VRAM back. Set
+    PAINTS_UNDO_TAGGER_KEEP_LOADED=1 to keep sessions cached instead."""
+    global _loaded
+    import gc
+    for session, _tags in list(_loaded.values()):
+        del session
+    _loaded = {}
+    gc.collect()
+
+
 def _providers():
     if 'CUDAExecutionProvider' in ort.get_available_providers():
         return ['CUDAExecutionProvider', 'CPUExecutionProvider']
@@ -163,4 +176,8 @@ def default_interrogator(image, threshold=0.35, character_threshold=0.85,
     res = ", ".join(
         item[0].replace("(", "\\(").replace(")", "\\)") for item in selected
     ).replace('_', ' ')
+
+    # Free tagger VRAM so Steps 2/3 (esp. Step 3 video) get it back.
+    if os.environ.get('PAINTS_UNDO_TAGGER_KEEP_LOADED', '0') != '1':
+        release()
     return res
