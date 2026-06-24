@@ -39,6 +39,7 @@ ENV_NAME  = "paints_undo"
 PYTHON_VERSION = "3.10"
 MIN_VRAM_GB  = 8   # hard warning threshold — below this Step 2 will almost certainly fail
 SOFT_VRAM_GB = 10  # soft warning threshold — below this Step 2 may OOM on larger images
+HIGH_VRAM_GB = 20  # at/above this, enable resident-model (high-VRAM) mode for speed
 
 # Compute capability -> (cu_tag, friendly name)
 CUDA_MAP = {
@@ -68,7 +69,6 @@ REQUIREMENTS = [
     "safetensors",
     "pillow",
     "einops",
-    "onnxruntime",
     "av",
     "imageio",
     "imageio-ffmpeg",
@@ -246,7 +246,7 @@ def check_gpu():
         warn("No NVIDIA GPU detected via nvidia-smi.")
         warn("Make sure NVIDIA drivers are installed and nvidia-smi is in PATH.")
         warn("Falling back to CUDA 11.8 (cu118) — change manually if needed.")
-        return "cu118", "CUDA 11.8 (fallback — no GPU detected)"
+        return "cu118", "CUDA 11.8 (fallback — no GPU detected)", False
 
     # Print all detected GPUs
     print(f"  Found {len(gpus)} GPU(s):")
@@ -273,7 +273,10 @@ def check_gpu():
         ok(f"Primary GPU: {primary['name']} ({vram_gb:.1f} GB VRAM)")
 
     ok(f"Selected PyTorch build: {cu_desc}")
-    return cu_tag, cu_desc
+    high_vram = vram_gb >= HIGH_VRAM_GB
+    if high_vram:
+        ok(f"High-VRAM mode will be enabled (>= {HIGH_VRAM_GB} GB) for faster runs.")
+    return cu_tag, cu_desc, high_vram
 
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
@@ -366,6 +369,24 @@ def install_requirements():
     ok("Requirements installed")
 
 
+def install_onnxruntime(cu_tag):
+    """Install a CUDA-matched onnxruntime-gpu for the WD tagger.
+    Falls back to CPU onnxruntime if the GPU build can't be installed."""
+    section("Installing onnxruntime (WD tagger)")
+    if cu_tag == "cu118":
+        pkg = "onnxruntime-gpu==1.17.1"   # last release defaulting to CUDA 11.8
+    else:
+        pkg = "onnxruntime-gpu"           # current release targets CUDA 12.x
+    info(f"Installing {pkg} ...")
+    result = conda_run(["pip", "install", pkg], check=False)
+    if result.returncode != 0:
+        warn("onnxruntime-gpu install failed — falling back to CPU onnxruntime.")
+        warn("The WD tagger (Step 1) will run on CPU.")
+        conda_run(["pip", "install", "onnxruntime"], check=False)
+    else:
+        ok("onnxruntime-gpu installed")
+
+
 # ── Verify PyTorch ────────────────────────────────────────────────────────────
 
 VERIFY_SCRIPT = """
@@ -436,8 +457,8 @@ changed = False
 
 patches = [
     (
-        'def _json_schema_to_python_type(schema: Any, defs=None) -> str:',
-        'def _json_schema_to_python_type(schema: Any, defs=None) -> str:\\n    if not isinstance(schema, dict): return "any"'
+        'def _json_schema_to_python_type(schema: Any, defs) -> str:',
+        'def _json_schema_to_python_type(schema: Any, defs) -> str:\\n    if not isinstance(schema, dict): return "any"'
     ),
     (
         'def get_type(schema: dict):',
@@ -625,7 +646,7 @@ def apply_patches(install_dir: Path):
 
 # ── Launch script ─────────────────────────────────────────────────────────────
 
-def write_launch_script(install_dir: Path):
+def write_launch_script(install_dir: Path, high_vram: bool = False):
     section("Writing launch script")
 
     # Write banner helper so start scripts can print it via Python
@@ -642,25 +663,39 @@ def write_launch_script(install_dir: Path):
 
     if IS_WINDOWS:
         path = install_dir / "start.bat"
+        hv_line = "set PAINTS_UNDO_HIGH_VRAM=1\n" if high_vram else ""
         path.write_text(
             "@echo off\n"
             "title PaintsUndo\n"
             f'cd /d "{install_dir}"\n'
             "chcp 65001 >nul\n"
-            f"conda run -n {ENV_NAME} python _banner.py\n"
+            f"{hv_line}"
+            # Activate the conda env (rather than `conda run`) so output streams
+            # live and errors/download progress are visible.
+            'for /f "delims=" %%i in (\'conda info --base 2^>nul\') do set "CONDA_BASE=%%i"\n'
+            "if not defined CONDA_BASE (\n"
+            "    echo [ERROR] conda not found in PATH.\n"
+            "    echo Open an Anaconda Prompt and re-run, or run: conda init cmd.exe\n"
+            "    pause\n"
+            "    exit /b 1\n"
+            ")\n"
+            f'call "%CONDA_BASE%\\Scripts\\activate.bat" {ENV_NAME}\n'
+            "python _banner.py\n"
             "echo.\n"
             "echo   Open your browser to: http://127.0.0.1:7860\n"
             "echo   Models download automatically on first run (~8-10 GB)\n"
             "echo.\n"
-            f"conda run -n {ENV_NAME} python gradio_app.py\n"
+            "python gradio_app.py\n"
             "pause\n",
             encoding="utf-8"
         )
     else:
         path = install_dir / "start.sh"
+        hv_line = "export PAINTS_UNDO_HIGH_VRAM=1\n" if high_vram else ""
         path.write_text(
             "#!/bin/bash\n"
             f'cd "{install_dir}"\n'
+            f"{hv_line}"
             "python3 _banner.py 2>/dev/null || echo '  PaintsUndo'\n"
             "echo\n"
             "echo '  Open your browser to: http://127.0.0.1:7860'\n"
@@ -758,14 +793,15 @@ def main():
 
     # Full install
     check_prereqs()
-    cu_tag, _ = check_gpu()
+    cu_tag, _, high_vram = check_gpu()
     clone_repo(install_dir)
     create_env()
     install_pytorch(cu_tag)
     install_requirements()
+    install_onnxruntime(cu_tag)
     verify_pytorch(install_dir)
     apply_patches(install_dir)
-    launch_path = write_launch_script(install_dir)
+    launch_path = write_launch_script(install_dir, high_vram)
     print_summary(install_dir, launch_path)
 
     # Offer to launch immediately

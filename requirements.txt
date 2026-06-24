@@ -5,7 +5,6 @@
 # from this file -- you may get a CPU-only or mismatched build.
 #
 # These pins are kept in sync with the REQUIREMENTS list in setup.py.
-# If you change one, change the other.
 
 huggingface_hub==0.23.4
 diffusers==0.28.0
@@ -22,7 +21,9 @@ tensorboardX
 safetensors
 pillow
 einops
-onnxruntime
+# onnxruntime-gpu is installed by setup.py with a CUDA-matched version
+# (CUDA 11.8 -> 1.17.1, CUDA 12.x -> latest), with CPU onnxruntime fallback.
+onnxruntime-gpu
 av
 imageio
 imageio-ffmpeg

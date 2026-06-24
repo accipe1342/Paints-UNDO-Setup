@@ -111,14 +111,17 @@ def resize_without_crop(image, target_width, target_height):
 
 
 @torch.inference_mode()
-def interrogator_process(x):
-    return wd14tagger.default_interrogator(x)
+def interrogator_process(x, models=None):
+    return wd14tagger.default_interrogator(x, models=models)
 
 
 @torch.inference_mode()
 def process(input_fg, prompt, input_undo_steps, image_width, image_height, seed, steps, n_prompt, cfg,
             progress=gr.Progress()):
-    rng = torch.Generator(device=memory_management.gpu).manual_seed(int(seed))
+    if input_fg is None:
+        raise gr.Error('Please upload an image in Step 1 first.')
+    if not input_undo_steps:
+        raise gr.Error('Select at least one Operation Step in Step 2.')
 
     memory_management.load_models_to_gpu(vae)
     fg = resize_and_center_crop(input_fg, image_width, image_height)
@@ -130,22 +133,40 @@ def process(input_fg, prompt, input_undo_steps, image_width, image_height, seed,
     unconds = encode_cropped_prompt_77tokens(n_prompt)
 
     memory_management.load_models_to_gpu(unet)
-    fs = torch.tensor(input_undo_steps).to(device=unet.device, dtype=torch.long)
     initial_latents = torch.zeros_like(concat_conds)
     concat_conds = concat_conds.to(device=unet.device, dtype=unet.dtype)
-    latents = k_sampler(
-        initial_latent=initial_latents,
-        strength=1.0,
-        num_inference_steps=steps,
-        guidance_scale=cfg,
-        batch_size=len(input_undo_steps),
-        generator=rng,
-        prompt_embeds=conds,
-        negative_prompt_embeds=unconds,
-        cross_attention_kwargs={'concat_conds': concat_conds, 'coded_conds': fs},
-        same_noise_in_batch=True,
-        progress_tqdm=functools.partial(progress.tqdm, desc='Generating Key Frames')
-    ).to(vae.dtype) / vae.config.scaling_factor
+
+    # Generate key frames in sub-batches to cap VRAM. Every frame shares the same
+    # noise (generator re-seeded identically per chunk), so chunking does not
+    # change the output. Override the chunk size with PAINTS_UNDO_KEYFRAME_BATCH.
+    total = len(input_undo_steps)
+    try:
+        keyframe_batch = int(os.environ.get('PAINTS_UNDO_KEYFRAME_BATCH', '6'))
+    except ValueError:
+        print('[WARN] PAINTS_UNDO_KEYFRAME_BATCH is not an integer; using 6.')
+        keyframe_batch = 6
+    keyframe_batch = max(1, min(keyframe_batch, total))
+
+    latents_chunks = []
+    for chunk_start in range(0, total, keyframe_batch):
+        chunk = input_undo_steps[chunk_start:chunk_start + keyframe_batch]
+        rng = torch.Generator(device=memory_management.gpu).manual_seed(int(seed))
+        fs = torch.tensor(chunk).to(device=unet.device, dtype=torch.long)
+        latents_chunks.append(k_sampler(
+            initial_latent=initial_latents,
+            strength=1.0,
+            num_inference_steps=steps,
+            guidance_scale=cfg,
+            batch_size=len(chunk),
+            generator=rng,
+            prompt_embeds=conds,
+            negative_prompt_embeds=unconds,
+            cross_attention_kwargs={'concat_conds': concat_conds, 'coded_conds': fs},
+            same_noise_in_batch=True,
+            progress_tqdm=functools.partial(
+                progress.tqdm, desc=f'Generating Key Frames ({chunk_start + len(chunk)}/{total})')
+        ))
+    latents = torch.cat(latents_chunks, dim=0).to(vae.dtype) / vae.config.scaling_factor
 
     memory_management.load_models_to_gpu(vae)
     pixels = vae.decode(latents).sample
@@ -213,6 +234,9 @@ def process_video_inner(image_1, image_2, prompt, seed=123, steps=25, cfg_scale=
 
 @torch.inference_mode()
 def process_video(keyframes, prompt, steps, cfg, fps, seed, progress=gr.Progress()):
+    if not keyframes or len(keyframes) < 2:
+        raise gr.Error('Generate key frames first -- at least 2 are needed to make a video.')
+
     result_frames = []
     cropped_images = []
 
@@ -268,6 +292,12 @@ with block:
             with gr.Column():
                 input_fg = gr.Image(sources=['upload'], type="numpy", label="Image", height=512)
             with gr.Column():
+                tagger_select = gr.Dropdown(
+                    label="Tagger model(s) for Step 1 (multiple = ensemble, merged by max confidence)",
+                    choices=wd14tagger.list_taggers(),
+                    value=list(wd14tagger.DEFAULT_TAGGERS),
+                    multiselect=True,
+                )
                 prompt_gen_button = gr.Button(value="Generate Prompt", interactive=False)
                 prompt = gr.Textbox(label="Output Prompt", interactive=True)
 
@@ -285,7 +315,9 @@ with block:
                                       value='lowres, bad anatomy, bad hands, cropped, worst quality')
 
             with gr.Column():
-                key_gen_button = gr.Button(value="Generate Key Frames", interactive=False)
+                with gr.Row():
+                    key_gen_button = gr.Button(value="Generate Key Frames", interactive=False)
+                    key_cancel_button = gr.Button(value="Cancel", variant="stop")
                 result_gallery = gr.Gallery(height=512, object_fit='contain', label='Outputs', columns=4)
                 keyframe_download_btn = gr.Button(value="⬇ Download All Key Frames", interactive=False)
                 keyframe_download_file = gr.File(label="Key Frames ZIP", visible=False)
@@ -301,7 +333,9 @@ with block:
                                       label="Sampling steps", value=50)
                 i2v_fps = gr.Slider(minimum=1, maximum=30, step=1, elem_id="i2v_motion", label="FPS", value=4)
             with gr.Column():
-                i2v_end_btn = gr.Button("Generate Video", interactive=False)
+                with gr.Row():
+                    i2v_end_btn = gr.Button("Generate Video", interactive=False)
+                    i2v_cancel_btn = gr.Button("Cancel", variant="stop")
                 i2v_output_video = gr.Video(label="Generated Video", elem_id="output_vid", autoplay=True,
                                             show_share_button=True, height=512)
         with gr.Row():
@@ -320,22 +354,24 @@ with block:
 
     prompt_gen_button.click(
         fn=interrogator_process,
-        inputs=[input_fg],
+        inputs=[input_fg, tagger_select],
         outputs=[prompt]
     ).then(
         lambda: [gr.update(interactive=True), gr.update(interactive=True), gr.update(interactive=False)],
         outputs=[prompt_gen_button, key_gen_button, i2v_end_btn]
     )
 
-    key_gen_button.click(
+    key_event = key_gen_button.click(
         fn=process,
         inputs=[input_fg, prompt, input_undo_steps, image_width, image_height, seed, steps, n_prompt, cfg],
         outputs=[result_gallery]
-    ).then(
+    )
+    key_event.then(
         lambda: [gr.update(interactive=True), gr.update(interactive=True),
                  gr.update(interactive=True), gr.update(interactive=True)],
         outputs=[prompt_gen_button, key_gen_button, i2v_end_btn, keyframe_download_btn]
     )
+    key_cancel_button.click(fn=None, inputs=None, outputs=None, cancels=[key_event])
 
     keyframe_download_btn.click(
         fn=lambda g: download_gallery_images(g, 'keyframe'),
@@ -347,14 +383,16 @@ with block:
         outputs=[keyframe_download_file]
     )
 
-    i2v_end_btn.click(
+    i2v_event = i2v_end_btn.click(
         inputs=[result_gallery, i2v_input_text, i2v_steps, i2v_cfg_scale, i2v_fps, i2v_seed],
         outputs=[i2v_output_video, i2v_output_images],
         fn=process_video
-    ).then(
+    )
+    i2v_event.then(
         lambda: gr.update(interactive=True),
         outputs=[output_frames_download_btn]
     )
+    i2v_cancel_btn.click(fn=None, inputs=None, outputs=None, cancels=[i2v_event])
 
     output_frames_download_btn.click(
         fn=lambda g: download_gallery_images(g, 'output_frame'),

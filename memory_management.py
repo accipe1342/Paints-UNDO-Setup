@@ -1,10 +1,20 @@
+import os
 import torch
 from contextlib import contextmanager
 
 
-high_vram = False
+# Set PAINTS_UNDO_HIGH_VRAM=1 to keep models resident on the GPU between stages
+# (faster, needs more VRAM). setup.py enables this automatically on large GPUs.
+high_vram = os.environ.get('PAINTS_UNDO_HIGH_VRAM', '0') == '1'
 gpu = torch.device('cuda')
 cpu = torch.device('cpu')
+
+if not torch.cuda.is_available():
+    raise SystemExit(
+        "[ERROR] No CUDA-capable GPU is available to PyTorch.\n"
+        "        Paints-UNDO requires an NVIDIA GPU. Check your drivers and\n"
+        "        that the CUDA build of PyTorch is installed."
+    )
 
 torch.zeros((1, 1)).to(gpu, torch.float32)
 torch.cuda.empty_cache()

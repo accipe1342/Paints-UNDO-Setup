@@ -14,6 +14,15 @@ This is a fork of [lllyasviel/Paints-UNDO](https://github.com/lllyasviel/Paints-
 - Warns if your VRAM is too low before you start
 - `--update` flag to re-apply patches without reinstalling
 
+### Added features (beyond the original)
+
+- **Multi-model WD tagger with a Step 1 picker** — choose one or several taggers in the UI; multiple are run as an ensemble and merged by max confidence. Newer, more accurate models than the original (EVA02-Large / ViT-Large v3) are the default.
+- **GPU tagging** — the WD tagger runs on CUDA (via `onnxruntime-gpu`, CUDA-matched at install) with automatic CPU fallback.
+- **Cancel buttons** for Step 2 (key frames) and Step 3 (video) so you can stop a long run without killing the app.
+- **Input validation** — friendly messages instead of tracebacks when no image is uploaded, no operation steps are selected, or there are too few key frames.
+- **VRAM-capped key frames** — Step 2 generates in sub-batches (output unchanged) so large step selections don't OOM.
+- **High-VRAM mode** — on GPUs with >= 20 GB, models stay resident for faster runs (auto-enabled by the installer).
+
 ## Requirements
 
 - Python 3.7+ (just to run the setup script — any Python will do)
@@ -53,11 +62,23 @@ Then open `http://127.0.0.1:7860` in your browser.
 
 ## Usage
 
-**Step 1** — Upload your image and click Generate Prompt. Runs WD14 tagger automatically.
+**Step 1** — Upload your image, optionally choose which **tagger model(s)** to use in the dropdown, then click Generate Prompt. Selecting multiple runs them as an ensemble and merges the tags. Models download on first use.
 
 **Step 2** — Click Generate Key Frames. Default operation steps (400, 600, 800, 900, 950, 999) work well. Steps 900 and 950 produce the most useful loose gesture sketches.
 
 **Step 3** — Video interpolation between keyframes. Works on all supported GPUs. May still OOM on cards with less than 12 GB VRAM — if so, reduce Image Width and Height in Step 2 before generating.
+
+Steps 2 and 3 each have a **Cancel** button to stop a running generation.
+
+### Advanced configuration (environment variables)
+
+Set these before launching (or add them to your `start` script) to change behavior without editing code:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `PAINTS_UNDO_TAGGERS` | `eva02-large-v3,vit-large-v3` | Comma-separated taggers for Step 1. Options: `moat-v2, vit-v3, vit-large-v3, swinv2-v3, convnext-v3, eva02-large-v3`. The Step 1 dropdown overrides this. |
+| `PAINTS_UNDO_HIGH_VRAM` | `0` | Set to `1` to keep all models resident on the GPU (faster, needs more VRAM). Auto-set by the installer on >= 20 GB cards. |
+| `PAINTS_UNDO_KEYFRAME_BATCH` | `6` | Max key frames generated per sub-batch in Step 2. Lower it if Step 2 runs out of memory. |
 
 ## Updating patches
 
@@ -100,4 +121,4 @@ Not recommended. Run natively on Windows instead for best GPU support.
 
 ## Credits
 
-Original project by [lllyasviel](https://github.com/lllyasviel). This fork adds installation tooling only.
+Original project by [lllyasviel](https://github.com/lllyasviel). This fork adds installation tooling plus the added features listed above.
