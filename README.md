@@ -31,7 +31,7 @@ You will be prompted for an install location. Everything else is automatic.
 
 **Or specify the path directly:**
 ```
-python setup.py --install-dir H:\PaintsUndo
+python setup.py --install-dir C:\AI\PaintsUndo
 python setup.py --install-dir ~/PaintsUndo
 ```
 
@@ -64,7 +64,7 @@ Then open `http://127.0.0.1:7860` in your browser.
 If you upgrade any packages and the UI breaks, re-apply the patches without reinstalling:
 
 ```
-python setup.py --update --install-dir H:\PaintsUndo
+python setup.py --update --install-dir C:\AI\PaintsUndo
 ```
 
 ## Troubleshooting
